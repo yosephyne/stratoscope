@@ -258,19 +258,16 @@ public class ResourceTests
             PanelLayout.For(new Rectangle(1000, 1400, 120, 38), 600, TaskbarEdge.Bottom, ui);
         }
 
-        for (int i = 0; i < 12; i++) Cycle(i);                  // warm up: fonts, caches
+        // Warm up: fonts, caches and the GDI objects that are created lazily and then kept. On the GitHub runner the
+        // count settles at 15 (flat over 400 more cycles), but with only 12 warm-up cycles the baseline was sometimes
+        // read at 3, before those objects existed, and the test failed without any leak.
+        for (int i = 0; i < 120; i++) Cycle(i);
         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
         var gdi0 = Gdi(); var user0 = User(); var managed0 = GC.GetTotalMemory(true);
-        var series = new List<uint>();
-        for (int b = 0; b < 8; b++)
-        {
-            for (int i = 0; i < 50; i++) Cycle(i);
-            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
-            series.Add(Gdi());
-        }
+        for (int i = 0; i < 200; i++) Cycle(i);
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
         var gdi1 = Gdi(); var user1 = User(); var managed1 = GC.GetTotalMemory(true);
 
-        Assert.True(false, "DIAGNOSTIC GDI start " + gdi0 + ", after each 50 cycles: " + string.Join(",", series));
         Assert.True(changes >= 200);
         Assert.True(gdi1 <= gdi0 + 6, "GDI objects went from " + gdi0 + " to " + gdi1);
         Assert.True(user1 <= user0 + 6, "USER objects (icons) went from " + user0 + " to " + user1);
