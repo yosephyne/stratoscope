@@ -60,6 +60,7 @@ public sealed record LiveDto
     /// <summary>With batch slots: how many requests run together at most, how many run now, how many wait for the engine's control lines.</summary>
     [JsonPropertyName("parallel")] public double? Parallel { get; init; }
     [JsonPropertyName("running")] public double? Running { get; init; }
+    [JsonPropertyName("outside_slots")] public double? OutsideSlots { get; init; }
     [JsonPropertyName("waiting")] public double? Waiting { get; init; }
 }
 

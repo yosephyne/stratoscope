@@ -23,6 +23,30 @@ public class StrataSnapshotTests
         return Json.Deserialize(json, Json.MetricsType)!;
     }
 
+    [Theory]
+    [InlineData(0, 17.0)]
+    [InlineData(1, null)]
+    public void OutputProgressRequiresAllActiveRequestsToBeInTheSlotTable(int outside, double? activeTokens)
+    {
+        var json = $$"""
+            {"state":"generating","generated":17,"tok_s":32,"parallel":2,"running":{{1 + outside}},"outside_slots":{{outside}},
+             "slots":[{"slot":0,"state":"decoding","generated":17},{"slot":1,"state":"idle","held_tokens":900}]}
+            """;
+        var snapshot = Provider().Translate(Metrics(json), "m");
+        Assert.Equal(new OutputProgress(1700000000, 5, 50, activeTokens), snapshot.OutputProgress);
+        Assert.Equal(32, new SpeedHistory().RatesBetweenPolls(123, snapshot).Decode);
+    }
+
+    [Fact]
+    public void PrefillDoesNotImplyZeroOutputWhenOtherRequestsRunOutsideTheSlotTable()
+    {
+        var snapshot = Provider().Translate(Metrics("""
+            {"state":"busy","phase":"prompt","parallel":2,"running":2,"outside_slots":2,
+             "slots":[{"slot":0,"state":"idle"},{"slot":1,"state":"idle"}]}
+            """), "m");
+        Assert.True(double.IsNaN(new SpeedHistory().RatesBetweenPolls(123, snapshot).Decode));
+    }
+
     [Fact]
     public void PrefillSpeedIsDerivedFromProgressBetweenPolls()
     {

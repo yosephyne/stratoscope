@@ -217,7 +217,7 @@ public sealed class HttpJsonSourceTests : IDisposable
         Assert.Equal(100_000, changed.FullPollCounters!.GeneratedTokens);
         history.Add(start.AddSeconds(6), changed);
         Assert.Equal(3, history.Count);
-        Assert.True(double.IsNaN(history.Average(HistoryCurve.Decode, SpeedHistory.Seconds(start.AddSeconds(6)))));
+        Assert.Equal(0, history.Average(HistoryCurve.Decode, SpeedHistory.Seconds(start.AddSeconds(6))));
         Assert.True(double.IsNaN(history.Average(HistoryCurve.Total, SpeedHistory.Seconds(start.AddSeconds(6)))));
         Assert.Equal(3, seen.Count(request => request == "GET /upstream/swift/metrics"));
         Assert.Equal(2, seen.Count(request => request == "GET /upstream/six-expert/metrics"));

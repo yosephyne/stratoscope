@@ -247,6 +247,7 @@ public sealed class EngineSnapshot
     internal string? HistorySource { get; set; }
     internal EngineCounters? FullPollCounters { get; set; }
     internal ThroughputWindow? ReportedThroughput { get; set; }
+    internal OutputProgress? OutputProgress { get; set; }
 
     /// <summary>
     /// The router refused the metrics request because its per-model request limit is reached (HTTP 429).
@@ -267,6 +268,7 @@ public sealed class EngineSnapshot
         var h = new HashCode();
         h.Add(Engine); h.Add(Model); h.Add(Status); h.Add(LoadingReason); h.Add(Queued); h.Add(RouterLimited);
         h.Add(ReportedThroughput);
+        h.Add(OutputProgress);
         if (Live is { } l)
         {
             h.Add(l.PromptRead); h.Add(l.PromptTotal); h.Add(l.Generated); h.Add(l.MaxTokens); h.Add(l.PrefillTokensPerSecond);

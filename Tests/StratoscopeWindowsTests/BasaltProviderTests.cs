@@ -17,6 +17,22 @@ public class BasaltSnapshotTests
     private static List<BasaltSlotDto?>? Slots(string fixture) => Json.Deserialize(Fixtures.Text(fixture), Json.BasaltSlotsType);
 
     [Fact]
+    public void CompletedAndActiveCountsRemainSeparateForReconciliation()
+    {
+        var metrics = Json.Deserialize("""
+            {
+              "live":{"state":"generating","slots":{"total":2,"active":1}},
+              "totals":{"since":100,"requests":4,"written":1234}
+            }
+            """, Json.BasaltMetricsType)!;
+        List<BasaltSlotDto?> slots = [new() { State = "decoding", Generated = 56 }, new() { State = "idle", Generated = 900 }];
+        var snapshot = Provider().Translate(metrics, slots, "m");
+        Assert.Equal(new OutputProgress(100, 4, 1234, 56), snapshot.OutputProgress);
+        Assert.Null(snapshot.Totals);
+        Assert.Null(Provider().Translate(metrics, [slots[0]], "m").OutputProgress!.Value.ActiveTokens);
+    }
+
+    [Fact]
     public void PrefillShowsTheProgressFromSlotsAndTheEnginesOwnSpeed()
     {
         var s = Provider().Translate(Metrics("basalt-0.3.2-prefill.json"), Slots("basalt-0.3.2-prefill.slots.json"), "m");

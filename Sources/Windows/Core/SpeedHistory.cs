@@ -51,7 +51,9 @@ public static class RequestBars
     }
 }
 
-internal readonly record struct ThroughputWindow(double Seconds, double Generated, double Prefill);
+internal readonly record struct ThroughputWindow(double Seconds, double Generated, double Prefill, bool Approximate = false);
+internal readonly record struct OutputProgress(double Session, double FinishedRequests, double CompletedTokens, double? ActiveTokens);
+public readonly record struct DecodeAverage(double Rate, bool Approximate);
 
 /// <summary>
 /// The last two minutes of speed of one server, for the history graph and the adaptive scales.
@@ -79,12 +81,16 @@ public sealed class SpeedHistory
     /// (a filter started at the window's oldest sample would restart on every repaint and make the left edge jump).
     /// </summary>
     public const double WarmupSeconds = 20;
-    /// <summary>Room for the window and the warm-up at the sample rate, with a margin for the odd extra full-poll sample.</summary>
+    /// <summary>Initial allocation. Retention is based on elapsed time.</summary>
     public const int Capacity = (int)((WindowSeconds + WarmupSeconds) / SampleSeconds) + 160;
 
-    private readonly double[] time = new double[Capacity];
-    private readonly double[][] values = { new double[Capacity], new double[Capacity], new double[Capacity] };
-    private int start, count;
+    internal const double RetainedSeconds = 600;
+    private readonly record struct PlotReading(double Time, double Prefill, double Decode, double Total, double WallDecode)
+    {
+        public double Rate(HistoryCurve curve) => curve switch { HistoryCurve.Prefill => Prefill, HistoryCurve.Decode => Decode, _ => Total };
+    }
+    private readonly Queue<PlotReading> samples = new(Capacity);
+    private PlotReading? latestPlot;
 
     /// <summary>The scale of the per-request bars in the taskbar readout (one request's decode speed).</summary>
     public SpeedScale RequestScale { get; } = new SpeedScale();
@@ -99,7 +105,8 @@ public sealed class SpeedHistory
     public SpeedScale PrefillChartScale { get; } = new SpeedScale(100);
     public SpeedScale DecodeChartScale { get; } = new SpeedScale(10);
 
-    public int Count => count;
+    public int Count => samples.Count;
+    internal double? LastSampleTime => latestPlot?.Time;
 
     public static double Seconds(DateTime utc) => (utc - DateTime.UnixEpoch).TotalSeconds;
 
@@ -109,9 +116,12 @@ public sealed class SpeedHistory
     private double counterSampleSeconds = double.NegativeInfinity;
     private readonly CounterRate prefillRate = new(), generatedRate = new();
     private readonly PhaseRate prefillPhase = new(), decodePhase = new();
-    private readonly record struct CounterReading(double Time, double Prefill, double Generated);
+    private readonly record struct CounterReading(double Time, double Prefill, double Generated, bool Reconciled = false);
     private readonly Queue<CounterReading> counterWindow = new(Capacity);
     private CounterReading latestCounters;
+    private CounterReading? lastAnchor;
+    private (double Time, OutputProgress Progress)? previousProgress;
+    private double decodeSince = double.NegativeInfinity;
     private ThroughputWindow? reportedThroughput;
     private double reportedThroughputAt;
     private bool phaseBaseline;
@@ -138,11 +148,9 @@ public sealed class SpeedHistory
         var hadBaseline = !double.IsNaN(lastCounterSeconds) && elapsed > 0 && elapsed <= MaxPollGapSeconds;
         var previous = latestCounters;
         var reset = hadBaseline && (prefill < previous.Prefill || generated < previous.Generated);
-        if (!hadBaseline || reset) counterWindow.Clear();
-        while (counterWindow.TryPeek(out var oldest) && (now - oldest.Time > WindowSeconds + MaxPollGapSeconds || counterWindow.Count == Capacity))
-            counterWindow.Dequeue();
+        if (!hadBaseline || reset) ResetDecode(now);
         latestCounters = new CounterReading(now, prefill, generated);
-        counterWindow.Enqueue(latestCounters);
+        SaveCounter(latestCounters);
         lastCounterSeconds = now;
         var phases = counters.HasPhaseClocks;
         if (!phases) { prefillPhase.Reset(); decodePhase.Reset(); }
@@ -173,8 +181,9 @@ public sealed class SpeedHistory
         if (reset || double.IsNaN(p) || double.IsNaN(g) || double.IsNaN(pp) || double.IsNaN(dp)) { AddSample(now, double.NaN, double.NaN); return true; }
         var total = ((prefill - previous.Prefill) + (generated - previous.Generated)) / elapsed;
         // The read that first brings the phase clocks is their baseline; until the next one the wall-time rates stand in.
-        if (phases && hadPhaseBaseline) AddSample(now, pp, dp, total);
-        else AddSample(now, p, g, total);
+        var wallDecode = (generated - previous.Generated) / elapsed;
+        if (phases && hadPhaseBaseline) AddPlotReading(now, pp, dp, total, wallDecode);
+        else AddPlotReading(now, p, g, total, wallDecode);
         return true;
     }
 
@@ -182,23 +191,26 @@ public sealed class SpeedHistory
     public void Add(DateTime utc, EngineSnapshot? s)
     {
         if (s?.RouterLimited == true) return;   // The panel can retain the data, but it is not a new observation.
+        var now = Seconds(utc);
         if (s?.HistorySource != lastHistorySource)
         {
             lastHistorySource = s?.HistorySource;
             lastCounterSeconds = double.NaN;
-            counterWindow.Clear();
+            ResetDecode(now);
             counterSampleSeconds = double.NegativeInfinity;
             lastPollSeconds = double.NaN;
         }
         reportedThroughput = s?.ReportedThroughput;
-        reportedThroughputAt = Seconds(utc);
+        reportedThroughputAt = now;
         if (s?.FullPollCounters is { } counters) AddCounters(utc, counters);
+        if (s?.OutputProgress is { } progress) ObserveOutputProgress(now, progress);
 
         // While counters feed the curves, do not interleave rates from another source.
-        if (Seconds(utc) - counterSampleSeconds > CounterFreshSeconds)
+        if (now - counterSampleSeconds > CounterFreshSeconds)
         {
-            var (prefill, decode) = RatesBetweenPolls(Seconds(utc), s);
-            AddSample(Seconds(utc), prefill, decode);
+            var (prefill, decode) = RatesBetweenPolls(now, s);
+            var wallDecode = ProgressRate(s, decode);
+            AddPlotReading(now, prefill, decode, prefill + decode, wallDecode);
         }
         if (RequestBars.PeakSpeed(RequestBars.From(s)) is double peak) RequestScale.Observe(peak, Seconds(utc));
         if (s?.Slots != null)
@@ -222,6 +234,46 @@ public sealed class SpeedHistory
             DecodeChartScale.Observe(decodeMax, Seconds(utc));
             PrefillChartScale.Observe(prefillMax, Seconds(utc));
         }
+    }
+
+    private static double ProgressRate(EngineSnapshot? snapshot, double decode) =>
+        snapshot?.OutputProgress != null && snapshot.Live?.DecodeTokensPerSecond is double speed ? speed : decode;
+
+    private void ResetDecode(double now)
+    {
+        counterWindow.Clear();
+        lastAnchor = null;
+        previousProgress = null;
+        decodeSince = now;
+        if (reportedThroughputAt < now) reportedThroughput = null;
+    }
+
+    private void SaveCounter(CounterReading reading)
+    {
+        if (lastAnchor is { } previous && (reading.Time <= previous.Time || reading.Generated < previous.Generated)) return;
+        while (counterWindow.TryPeek(out var oldest) && reading.Time - oldest.Time > RetainedSeconds)
+            counterWindow.Dequeue();
+        counterWindow.Enqueue(reading);
+        lastAnchor = reading;
+    }
+
+    private void ObserveOutputProgress(double now, OutputProgress progress)
+    {
+        if (previousProgress is { } previous)
+        {
+            var old = previous.Progress;
+            if (old.Session != progress.Session || old.FinishedRequests > progress.FinishedRequests || old.CompletedTokens > progress.CompletedTokens)
+                ResetDecode(now);
+            else if (now > previous.Time && now - previous.Time <= MaxPollGapSeconds
+                && old.FinishedRequests == progress.FinishedRequests && old.CompletedTokens == progress.CompletedTokens
+                && old.ActiveTokens is double active)
+            {
+                // The completed count remained stable across the intervening slot read. A slot that finished
+                // between the two reads will be accounted for by the next reconciled snapshot.
+                SaveCounter(new CounterReading(previous.Time, double.NaN, old.CompletedTokens + active, Reconciled: true));
+            }
+        }
+        previousProgress = (now, progress);
     }
 
     /// <summary>A gap longer than this between two polls (a sleeping PC, a stalled engine) makes no rate: the counters then say nothing about the speed.</summary>
@@ -251,7 +303,7 @@ public sealed class SpeedHistory
         if (s != null && !s.IsError && s.HasModel && !s.IsLoading)
         {
             prefillCounter = s.Totals?.PrefillComputedTokens is double p && double.IsFinite(p) ? p : double.NaN;
-            generationCounter = s.Totals?.OutputTokens is double g && double.IsFinite(g) ? g : double.NaN;
+            generationCounter = !double.IsNaN(prefillCounter) && s.Totals?.OutputTokens is double g && double.IsFinite(g) ? g : double.NaN;
         }
         double Delta(double now, double before) => usable && !double.IsNaN(now) && !double.IsNaN(before) && now >= before ? (now - before) / elapsed : double.NaN;
         var prefillRate = Delta(prefillCounter, lastPrefillCounter);
@@ -280,6 +332,8 @@ public sealed class SpeedHistory
             slotPrefill = prefillSum ?? double.NaN;
             slotDecode = decodeSum ?? double.NaN;
         }
+        // An empty or partial slot table cannot stand in for the engine's aggregate speed.
+        if (s?.OutputProgress is { ActiveTokens: null }) slotDecode = double.NaN;
 
         lastPollSeconds = nowSeconds; lastPrefillCounter = prefillCounter; lastGenerationCounter = generationCounter;
         Array.Copy(slotRead, lastSlotRead, MaxSlots);
@@ -306,22 +360,17 @@ public sealed class SpeedHistory
         return (prefill, decode);
     }
 
-    /// <summary>Adds one sample; the total is prefill plus decode. Samples older than <see cref="WindowSeconds"/> are dropped.</summary>
+    /// <summary>Adds one sample of the engine's reported rates.</summary>
     public void AddSample(double nowSeconds, double prefill, double decode) =>
-        AddSample(nowSeconds, prefill, decode, double.IsNaN(prefill) || double.IsNaN(decode) ? double.NaN : prefill + decode);
+        AddPlotReading(nowSeconds, prefill, decode, prefill + decode, decode);
 
-    /// <summary>
-    /// Adds one sample with its own total: with phase speeds for prefill and decode (each over the time spent on its phase) the total is the
-    /// throughput over wall time, which is not their sum.
-    /// </summary>
-    public void AddSample(double nowSeconds, double prefill, double decode, double total)
+    private void AddPlotReading(double nowSeconds, double prefill, double decode, double total, double wallDecode)
     {
-        while (count > 0 && nowSeconds - time[start] > WindowSeconds + WarmupSeconds) { start = (start + 1) % Capacity; count--; }
-        if (count == Capacity) { start = (start + 1) % Capacity; count--; }
-        var i = (start + count) % Capacity;
-        time[i] = nowSeconds;
-        values[0][i] = prefill; values[1][i] = decode; values[2][i] = total;
-        count++;
+        if (latestPlot is { } last && nowSeconds <= last.Time) return;
+        while (samples.TryPeek(out var oldest) && nowSeconds - oldest.Time > RetainedSeconds) samples.Dequeue();
+        var reading = new PlotReading(nowSeconds, prefill, decode, total, wallDecode);
+        samples.Enqueue(reading);
+        latestPlot = reading;
         double Known(double v) => double.IsNaN(v) ? 0 : v;
         GraphScale.Observe(Math.Max(Known(total), Math.Max(Known(prefill), Known(decode))), nowSeconds);
         // Each curve also has its own scale: prefill runs at thousands of t/s, decode at tens, so one shared axis flattens decode.
@@ -330,22 +379,23 @@ public sealed class SpeedHistory
 
     /// <summary>
     /// Copies one curve, smoothed with damping <paramref name="damping"/>, into the caller's arrays: the age of each sample in seconds
-    /// (0 = now, up to <see cref="WindowSeconds"/>) and its value (NaN where unknown). Returns the number of samples. The arrays must hold
-    /// <see cref="Count"/> items.
+    /// (0 = now, up to <see cref="WindowSeconds"/>) and its value (NaN where unknown). Returns the number of samples.
+    /// Allocating <see cref="Count"/> items also covers the highest possible visible sample count.
     /// </summary>
     public int ReadSmoothed(HistoryCurve curve, double damping, double nowSeconds, double[] ages, double[] output)
     {
         var filter = new OnePoleFilter(damping);
-        var source = values[(int)curve];
         int n = 0;
-        for (int k = 0; k < count; k++)
+        var previous = double.NaN;
+        foreach (var sample in samples)
         {
-            var i = (start + k) % Capacity;
-            var age = nowSeconds - time[i];
+            var age = nowSeconds - sample.Time;
+            if (age > WindowSeconds + WarmupSeconds) continue;
             // The damping is per second (see HistorySmoothings.Damping); the samples are not evenly spaced, so each step uses its own spacing.
             // The filter runs through the warm-up samples too; only the window is returned.
-            var dt = k == 0 ? 1.0 : time[i] - time[(i + Capacity - 1) % Capacity];
-            var y = filter.Step(source[i], dt);
+            var dt = double.IsNaN(previous) ? 1.0 : sample.Time - previous;
+            previous = sample.Time;
+            var y = filter.Step(sample.Rate(curve), dt);
             if (age > WindowSeconds) continue;
             ages[n] = Math.Max(0, age); output[n] = y; n++;
         }
@@ -353,21 +403,88 @@ public sealed class SpeedHistory
     }
 
     /// <summary>
-    /// Decode and total use up to two minutes of wall time. Engine history can provide the window on the first poll.
-    /// Prefill is the average of positive raw prefill samples. NaN when the necessary data is unavailable.
+    /// Decode uses observed output counts and elapsed wall time, filling missing intervals from reported rates.
+    /// Prefill weights positive raw samples by their elapsed time. NaN when the necessary data is unavailable.
     /// </summary>
     public double Average(HistoryCurve curve, double nowSeconds)
     {
-        if (curve != HistoryCurve.Prefill) return WallAverage(curve, nowSeconds);
-        var source = values[(int)curve];
-        double sum = 0; int n = 0;
-        for (int k = 0; k < count; k++)
+        if (curve == HistoryCurve.Decode) return GetDecodeAverage(nowSeconds).Rate;
+        if (curve == HistoryCurve.Total) return WallAverage(curve, nowSeconds);
+        if (latestPlot is not { } newest || nowSeconds - newest.Time > MaxPollGapSeconds) return double.NaN;
+        var (tokens, seconds) = SumRates(Math.Max(decodeSince, newest.Time - WindowSeconds), newest.Time, prefill: true);
+        return seconds > 0 ? tokens / seconds : newest.Prefill > 0 ? newest.Prefill : double.NaN;
+    }
+
+    /// <summary>Measured token deltas take precedence over estimated rates for the same elapsed time.</summary>
+    public DecodeAverage GetDecodeAverage(double nowSeconds)
+    {
+        var end = Math.Max(latestPlot?.Time ?? decodeSince, lastAnchor?.Time ?? decodeSince);
+        if (!double.IsFinite(end) || nowSeconds - end > MaxPollGapSeconds) return new(double.NaN, false);
+        var cutoff = Math.Max(decodeSince, end - WindowSeconds);
+        double tokens = 0, seconds = 0;
+        var estimated = false;
+        CounterReading? previous = null;
+        double firstCovered = end, lastCovered = cutoff;
+        foreach (var current in counterWindow)
         {
-            var i = (start + k) % Capacity;
-            if (nowSeconds - time[i] > WindowSeconds || double.IsNaN(source[i]) || source[i] <= 0) continue;
-            sum += source[i]; n++;
+            if (previous is { } before && current.Time > cutoff && before.Time < end)
+            {
+                var from = Math.Max(cutoff, before.Time);
+                var to = Math.Min(end, current.Time);
+                var duration = current.Time - before.Time;
+                var emitted = current.Generated - before.Generated;
+                var fraction = (to - from) / duration;
+                estimated |= current.Reconciled || before.Reconciled;
+                if (fraction < 1 && emitted > 0)
+                {
+                    estimated = true;
+                    var (all, observed) = SumRates(before.Time, current.Time);
+                    if (all > 0 && observed >= duration - 1e-6)
+                        fraction = SumRates(from, to).Tokens / all;
+                }
+                tokens += emitted * Math.Clamp(fraction, 0, 1);
+                seconds += to - from;
+                firstCovered = Math.Min(firstCovered, from);
+                lastCovered = Math.Max(lastCovered, to);
+            }
+            previous = current;
         }
-        return n == 0 ? double.NaN : sum / n;
+        var prefix = SumRates(cutoff, firstCovered);
+        var suffix = seconds > 0 ? SumRates(lastCovered, end) : default;
+        var estimatedSeconds = prefix.Seconds + suffix.Seconds;
+        tokens += prefix.Tokens + suffix.Tokens;
+        seconds += estimatedSeconds;
+
+        if (reportedThroughput is { } reported && nowSeconds - reportedThroughputAt <= MaxPollGapSeconds
+            && (reported.Seconds > seconds + 1e-6 || estimatedSeconds > 0 && reported.Seconds >= seconds - 1e-6))
+            return new(reported.Generated / reported.Seconds, reported.Approximate);
+        if (seconds > 0) return new(tokens / seconds, estimated || estimatedSeconds > 0);
+        if (latestPlot is { } sample && sample.Time >= cutoff && double.IsFinite(sample.WallDecode) && sample.WallDecode >= 0)
+            return new(sample.WallDecode, true);
+        return new(double.NaN, false);
+    }
+
+    private (double Tokens, double Seconds) SumRates(double from, double to, bool prefill = false)
+    {
+        if (from >= to) return default;
+        double tokens = 0, seconds = 0, previous = double.NaN;
+        foreach (var sample in samples)
+        {
+            var rate = prefill ? sample.Prefill : sample.WallDecode;
+            var elapsed = sample.Time - previous;
+            if (elapsed > 0 && elapsed <= MaxPollGapSeconds && double.IsFinite(rate) && rate >= 0 && (!prefill || rate > 0))
+            {
+                var overlap = Math.Min(to, sample.Time) - Math.Max(from, previous);
+                if (overlap > 0)
+                {
+                    tokens += rate * overlap;
+                    seconds += overlap;
+                }
+            }
+            if (sample.Time >= to) break;
+            previous = sample.Time;
+        }
+        return (tokens, seconds);
     }
 
     private double WallAverage(HistoryCurve curve, double nowSeconds)
@@ -393,5 +510,5 @@ public sealed class SpeedHistory
     }
 
     /// <summary>The newest raw value of a curve, or NaN when there is none.</summary>
-    public double Latest(HistoryCurve curve) => count == 0 ? double.NaN : values[(int)curve][(start + count - 1) % Capacity];
+    public double Latest(HistoryCurve curve) => latestPlot?.Rate(curve) ?? double.NaN;
 }

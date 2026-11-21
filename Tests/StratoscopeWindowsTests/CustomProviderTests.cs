@@ -286,9 +286,8 @@ public class CustomUiStateTests
         panel.History = history;
         var texts = Painters.Paint(panel, true, out _).Texts.ToList();
         Assert.Contains("Avg decode", texts);
-        Assert.Contains("Avg total", texts);
+        Assert.DoesNotContain("Avg total", texts);
         Assert.Equal("20", texts[texts.IndexOf("Avg decode") + 1]);
-        Assert.Equal("24", texts[texts.IndexOf("Avg total") + 1]);
     }
 
     private const string Address = "http://127.0.0.1:8095";

@@ -17,7 +17,7 @@ public sealed class ServerMonitor
     public EngineSnapshot? Snapshot { get; private set; }
     /// <summary>Why the engine does not answer, in English.</summary>
     public string? Error { get; private set; }
-    /// <summary>The last 60 seconds of speed and the adaptive scales: one sample per poll.</summary>
+    /// <summary>The rolling speed graph, its longer observation history and the adaptive scales.</summary>
     public SpeedHistory History { get; } = new SpeedHistory();
 
     /// <summary>True once the first poll has finished.</summary>
@@ -71,9 +71,11 @@ public sealed class ServerMonitor
         finally
         {
             Polled = true;
+            var previousSample = History.LastSampleTime;
             History.Add(DateTime.UtcNow, cancelled ? null : Snapshot);
             var content = HashCode.Combine(Snapshot?.ContentHash() ?? 0, Error, Faulted);
-            if (content != lastContent || (!cancelled && Snapshot?.FullPollCounters != null))
+            if (content != lastContent || (!cancelled && Snapshot is { RouterLimited: false }
+                && (History.LastSampleTime != previousSample || Snapshot.FullPollCounters != null)))
             {
                 lastContent = content;
                 DataVersion++;

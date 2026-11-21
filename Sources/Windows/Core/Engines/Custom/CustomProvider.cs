@@ -125,19 +125,24 @@ public sealed class CustomProvider : RoutedProvider
                 if (entry is { Kind: "engine", T: double t }) since = Math.Max(since, t);
 
         var start = end;
+        var cutoff = end - SpeedHistory.WindowSeconds;
+        var approximate = false;
         double generated = 0, prefilled = 0;
-        for (var i = history.Count - 1; i > 0 && end - start < SpeedHistory.WindowSeconds; i--)
+        for (var i = history.Count - 1; i > 0 && start > cutoff; i--)
         {
             if (history[i - 1]?.T is not double previous || previous < since || history[i] is not { } sample) break;
             var elapsed = start - previous;
             if (!double.IsFinite(elapsed) || elapsed <= 0 || elapsed > SpeedHistory.MaxPollGapSeconds
                 || CountTokens(sample.DecodeTps, elapsed) is not double output
                 || CountTokens(sample.PrefillTps, elapsed) is not double prompt) break;
-            generated += output;
-            prefilled += prompt;
-            start = previous;
+            var boundary = Math.Max(previous, cutoff);
+            var fraction = (start - boundary) / elapsed;
+            approximate |= fraction < 1 && output > 0;
+            generated += output * fraction;
+            prefilled += prompt * fraction;
+            start = boundary;
         }
-        return end > start ? new ThroughputWindow(end - start, generated, prefilled) : null;
+        return end > start ? new ThroughputWindow(end - start, generated, prefilled, approximate) : null;
     }
 
     private static double? CountTokens(double? rate, double elapsed)

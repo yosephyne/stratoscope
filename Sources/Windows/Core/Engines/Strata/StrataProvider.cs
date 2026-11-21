@@ -142,7 +142,7 @@ public sealed class StrataProvider : RoutedProvider
                 PrefillTokensPerSecond = prefill,
                 DecodeTokensPerSecond = decodeSpeed,
                 ReusedEstimate = reused,
-                Running = together ? (int)Math.Max(running.Count, live.Running ?? 0) : null,
+                Running = together || live.Running > 1 ? (int)Math.Max(running.Count, live.Running ?? 0) : null,
                 Waiting = live.Waiting is double w && w > 0 ? (int)w : null,
             };
         }
@@ -222,6 +222,22 @@ public sealed class StrataProvider : RoutedProvider
             Live = liveRequest, Recent = recent,
             Context = new ContextUsage { Used = ctxUsed, Max = eng.MaxContext, CompactAt = CompactAt(model) },   // null = the engine did not say
             System = system, Cache = cache, Totals = totals, Info = info, Slots = slots, Links = Links(),
+            OutputProgress = ReadOutputProgress(m.Totals, live, rawSlots, running),
         };
+    }
+
+    private static OutputProgress? ReadOutputProgress(TotalsDto? totals, LiveDto live, List<SlotDto> slots, List<SlotDto> running)
+    {
+        if (totals is not { Since: double since, Requests: double finished, OutputTokens: double written }
+            || !double.IsFinite(since) || !double.IsFinite(finished) || finished < 0
+            || !double.IsFinite(written) || written < 0) return null;
+
+        // In some configurations the engine runs requests outside this table. A complete set is required to sum live progress.
+        double? active = null;
+        if (live.OutsideSlots == 0 && live.Running == running.Count && live.Parallel == slots.Count && slots.Count > 0
+            && slots.All(slot => slot.State is "idle" or "reading" or "decoding")
+            && running.All(slot => slot.Generated is double n && double.IsFinite(n) && n >= 0))
+            active = running.Sum(slot => slot.Generated!.Value);
+        return new OutputProgress(since, finished, written, active);
     }
 }

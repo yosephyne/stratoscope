@@ -9,8 +9,8 @@ namespace Stratoscope.Core.Engines.Basalt;
 ///  - the router's /running (optional), and Basalt's /metrics, reached through the router at /upstream/&lt;model&gt;/metrics
 ///  - Basalt's /slots (the llama.cpp shape), asked only while a request runs: /metrics gives the prompt's size, only /slots says how much of
 ///    it is read, and it also carries the request's token limit and its cache reuse.
-/// Basalt has no conversation cache list and no totals in these documents, so those parts of the panel are not drawn; batch slots come from
-/// <c>/slots</c> when the engine has more than one.
+/// Basalt reports completed totals in newer versions. They are kept separate from live generation totals.
+/// Batch slots come from <c>/slots</c> when the engine has more than one.
 ///
 /// History curves: Basalt sends no cumulative counter (<c>/metrics</c> has the finished requests only), so <see cref="Totals.PrefillComputedTokens"/>
 /// stays empty and the curves take the slots: each decoding slot's own <c>tok_s</c> (the engine's window), and the reading slots' <c>prefill_done</c>
@@ -184,7 +184,36 @@ public sealed class BasaltProvider : RoutedProvider
             Live = liveRequest, Recent = recent,
             Context = new ContextUsage { Used = ctxUsed, Max = eng.MaxContext, CompactAt = CompactAt(model) },
             System = system, Cache = cache, Info = info, Slots = batchSlots, Links = Links(),
+            OutputProgress = ReadOutputProgress(m, rows, status),
         };
+    }
+
+    private static OutputProgress? ReadOutputProgress(BasaltMetrics metrics, List<BasaltSlotDto> rows, EngineStatus status)
+    {
+        if (metrics.Totals is not { Since: double since, Requests: double finished, Written: double written }
+            || !double.IsFinite(since) || !double.IsFinite(finished) || finished < 0
+            || !double.IsFinite(written) || written < 0) return null;
+
+        double? activeTokens = null;
+        if (metrics.Live?.Slots is { Active: double active, Total: double total } && rows.Count == total
+            && rows.All(row => row.State is "idle" or "prefill" or "decoding"))
+        {
+            // /slots and /metrics are separate observations. Discard an incomplete slot table.
+            int activeRows = 0;
+            double sum = 0;
+            foreach (var row in rows)
+            {
+                if (row.State == "idle") continue;
+                if (row.Generated is not double n || !double.IsFinite(n) || n < 0) return new OutputProgress(since, finished, written, null);
+                activeRows++;
+                sum += n;
+            }
+            if (activeRows == active) activeTokens = sum;
+        }
+        else if (rows.Count == 0 && status == EngineStatus.Idle && metrics.Live?.Slots is { Total: 1, Active: 0 })
+            activeTokens = 0;
+
+        return new OutputProgress(since, finished, written, activeTokens);
     }
 
     /// <summary>Why a request cannot start yet, from the engine's state and, while it loads, its progress.</summary>

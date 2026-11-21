@@ -11,7 +11,15 @@ public sealed record BasaltMetrics
     [JsonPropertyName("engine"), JsonConverter(typeof(TolerantObject<BasaltEngineDto>))] public BasaltEngineDto? Engine { get; init; }
     [JsonPropertyName("live"), JsonConverter(typeof(TolerantObject<BasaltLiveDto>))] public BasaltLiveDto? Live { get; init; }
     [JsonPropertyName("requests"), JsonConverter(typeof(TolerantList<BasaltRequestDto>))] public List<BasaltRequestDto?>? Requests { get; init; }
+    [JsonPropertyName("totals"), JsonConverter(typeof(TolerantObject<BasaltTotalsDto>))] public BasaltTotalsDto? Totals { get; init; }
     [JsonPropertyName("hardware"), JsonConverter(typeof(TolerantObject<BasaltHardwareDto>))] public BasaltHardwareDto? Hardware { get; init; }
+}
+
+public sealed record BasaltTotalsDto
+{
+    [JsonPropertyName("since")] public double? Since { get; init; }
+    [JsonPropertyName("requests")] public double? Requests { get; init; }
+    [JsonPropertyName("written")] public double? Written { get; init; }
 }
 
 public sealed record BasaltEngineDto

@@ -214,7 +214,8 @@ public class CounterRateTests
         for (int t = 0; t <= 120; t += 3) h.Add(At(t), Snap("old", t * 100));
         var end = SpeedHistory.Seconds(At(121));
         h.Add(At(121), Snap("old", 12_300));
-        Assert.Equal(24_600d / 121, h.Average(HistoryCurve.Decode, end), 9);
+        Assert.Equal(24_400d / 120, h.Average(HistoryCurve.Decode, end), 9);
+        Assert.True(h.GetDecodeAverage(end).Approximate);
         Assert.Equal(36_900d / 121, h.Average(HistoryCurve.Total, end), 9);
         h.Add(At(122), Snap("new", 45_000));
         Assert.True(double.IsNaN(h.Average(HistoryCurve.Decode, end + 1)));
@@ -231,6 +232,25 @@ public class CounterRateTests
         var now = SpeedHistory.Seconds(At(5));
         Assert.Equal(8d / 5, h.Average(HistoryCurve.Decode, now));
         Assert.Equal(12d / 5, h.Average(HistoryCurve.Total, now));
+    }
+
+    [Fact]
+    public void ReconciledSlotProgressCountsCompletionAndSlotReuseOnlyOnce()
+    {
+        var h = new SpeedHistory();
+        void Observe(int time, int completed, int finished, int active, bool idle = false) =>
+            h.Add(At(time), new EngineSnapshot("Test", "model", idle ? EngineStatus.Idle : EngineStatus.Decode)
+            {
+                HistorySource = "route/model",
+                OutputProgress = new OutputProgress(1, finished, completed, active),
+                Live = idle ? null : new LiveRequest { DecodeTokensPerSecond = 999 },
+            });
+        Observe(0, 100, 1, 100);
+        Observe(2, 100, 1, 120);
+        Observe(4, 250, 2, 0, idle: true);
+        Observe(6, 250, 2, 0, idle: true);
+        // The first and third observations are reconciled. Ignore the 999 t/s samples within the measured 50-token interval.
+        Assert.Equal(50d / 6, h.Average(HistoryCurve.Decode, SpeedHistory.Seconds(At(6))), 9);
     }
 
     [Theory]
@@ -513,8 +533,8 @@ public class SpeedHistoryTests
         var h = new SpeedHistory();
         Assert.Equal(120, SpeedHistory.WindowSeconds);
         for (int k = 0; k <= 600; k++) h.AddSample(k * SpeedHistory.SampleSeconds, 10, 20);       // 300 s at the sample rate
-        // The buffer also keeps the warm-up before the window (160 to 300 s); the graph reads only the window (180 to 300 s), both ends included.
-        Assert.Equal((int)((SpeedHistory.WindowSeconds + SpeedHistory.WarmupSeconds) / SpeedHistory.SampleSeconds) + 1, h.Count);
+        // Retain progress beyond the display window. The renderer sees only 180 to 300 s.
+        Assert.Equal(601, h.Count);
         var n = h.ReadSmoothed(HistoryCurve.Decode, 0, 300, Ages, Values);
         Assert.Equal((int)(SpeedHistory.WindowSeconds / SpeedHistory.SampleSeconds) + 1, n);
         Assert.Equal(120, Ages[0]);
@@ -683,15 +703,38 @@ public class RequestBarTests
 public class WindowAverageTests
 {
     [Fact]
-    public void ThePrefillAverageUsesRawSamplesAndThroughputRequiresCounters()
+    public void DecodeCombinesReportedRatesOverElapsedTimeIncludingIdle()
+    {
+        var h = new SpeedHistory();
+        h.AddSample(0, 0, 0);
+        h.AddSample(10, 0, 80);
+        h.AddSample(30, 0, 0);
+        Assert.Equal(800d / 30, h.Average(HistoryCurve.Decode, 30), 9);
+    }
+
+    [Fact]
+    public void FastSamplesPreserveTwoMinutesOfPlotHistory()
+    {
+        var h = new SpeedHistory();
+        for (int i = 0; i <= 1800; i++) h.AddSample(i / 10.0, 100, 20);
+        var ages = new double[h.Count];
+        var rates = new double[h.Count];
+        var count = h.ReadSmoothed(HistoryCurve.Decode, 0.5, 180, ages, rates);
+        Assert.Equal(1201, count);
+        Assert.Equal(120, ages[0]);
+        Assert.Equal(0, ages[count - 1]);
+    }
+
+    [Fact]
+    public void PrefillUsesObservedPositiveRatesAndDecodeUsesRatesWhenCountsAreMissing()
     {
         var h = new SpeedHistory();
         h.AddSample(0, 0, 0);                      // older than the window at the end (121 s): dropped
         h.AddSample(100, 10, 100);
         h.AddSample(110, 20, 200);
         h.AddSample(121, double.NaN, 300);
-        Assert.Equal(15, h.Average(HistoryCurve.Prefill, 121));        // the two known samples
-        Assert.True(double.IsNaN(h.Average(HistoryCurve.Decode, 121)));
+        Assert.Equal(20, h.Average(HistoryCurve.Prefill, 121));        // the opening gap and the missing rate are excluded
+        Assert.Equal(5300d / 21, h.Average(HistoryCurve.Decode, 121), 9);
         Assert.True(double.IsNaN(h.Average(HistoryCurve.Total, 121)));
         Assert.True(double.IsNaN(new SpeedHistory().Average(HistoryCurve.Total, 0)));
     }
@@ -703,7 +746,7 @@ public class WindowAverageTests
         h.AddSample(0, 0, 0);
         h.AddSample(2, 100, 0);
         h.AddSample(3, 300, 0);
-        Assert.Equal(200, h.Average(HistoryCurve.Prefill, 3));
+        Assert.Equal(500d / 3, h.Average(HistoryCurve.Prefill, 3));
     }
 
     [Fact]

@@ -657,26 +657,24 @@ internal sealed class PanelPainter
     [ThreadStatic] private static double[]? historyAges, historyValues;
 
     /// <summary>
-    /// The last 60 seconds in one graph, like a frame-rate graph: orange is the prefill speed (prompt tokens per second), blue the decode speed
-    /// (generated tokens per second) and the ink colour the total throughput (prompt plus generated tokens per second, the vLLM and
-    /// OpenTelemetry GenAI meaning, see <see cref="SpeedHistory"/>). The total is a third curve in the same graph, not a separate sparkline: it shares the axis,
-    /// so it reads directly against its two parts, and it costs no height. The legend row above the graph gives, for each curve, the colour mark, the name and its average over the 60 s (of the raw samples).
-    /// The vertical axis is the adaptive scale of the history (0 to its maximum, no label: the gridlines are 0, half and the maximum); the horizontal one is the last 60 s, newest on the right, and has no labels.
+    /// Two minutes of prefill and decode speeds, each with its own adaptive scale. The legend uses averages
+    /// from unsmoothed measurements. Approximate decode means some tokens came from a rate or boundary estimate.
     /// </summary>
     private float HistoryBlock(SpeedHistory history, float y)
     {
         var inner = Width - 2 * Pad;
         // "All": the curves are the engine over all requests together (the Speed section below is per request).
-        var curves = new[] { (HistoryCurve.Prefill, "Avg prefill", pal.Orange), (HistoryCurve.Decode, "Avg decode", pal.Blue), (HistoryCurve.Total, "Avg total", pal.Label) };
+        var curves = new[] { (HistoryCurve.Prefill, "Avg prefill", pal.Orange), (HistoryCurve.Decode, "Avg decode", pal.Blue) };
+        var now = SpeedHistory.Seconds(model.Now);
         for (int i = 0; i < curves.Length; i++)
         {
             var (curve, name, color) = curves[i];
-            var x = Pad + new[] { 0f, 0.36f, 0.71f }[i] * inner;    // the last name is the shortest
-            // The legend uses the unsmoothed window. Decode and total use cumulative tokens and wall time.
+            var x = Pad + 0.36f * i * inner;
             using (var brush = new SolidBrush(color)) g.FillRectangle(brush, x, y + 14, 8, 3);
             T(name, x + 13, y + 8, Body, false, pal.Dim);
-            var average = history.Average(curve, SpeedHistory.Seconds(model.Now));
-            T(double.IsNaN(average) ? Fmt.Missing : Fmt.Number(average), x + 13 + TextWidth(name, F(Body, false)) + 5, y + 8, Body, true, curve == HistoryCurve.Total ? null : color);
+            var average = curve == HistoryCurve.Decode ? history.GetDecodeAverage(now) : new DecodeAverage(history.Average(curve, now), false);
+            var value = double.IsNaN(average.Rate) ? Fmt.Missing : (average.Approximate ? "≈" : "") + Fmt.Number(average.Rate);
+            T(value, x + 13 + TextWidth(name, F(Body, false)) + 5, y + 8, Body, true, color);
         }
 
         var left = Pad + HistoryGutter; var right = Width - Pad;
@@ -689,8 +687,12 @@ internal sealed class PanelPainter
                 var gy = (float)Math.Round(top + plotH - plotH * f) - 0.5f;
                 g.DrawLine(pen, left, gy, right, gy);
             }
-        historyAges ??= new double[SpeedHistory.Capacity]; historyValues ??= new double[SpeedHistory.Capacity];
-        var now = SpeedHistory.Seconds(model.Now);
+        if (historyAges == null || historyValues == null || historyAges.Length < history.Count)
+        {
+            var capacity = Math.Max(history.Count, (historyAges?.Length ?? SpeedHistory.Capacity) * 2);
+            historyAges = new double[capacity];
+            historyValues = new double[capacity];
+        }
         var saved = g.SmoothingMode;
         g.SetClip(new RectangleF(left, top - 1, right - left, plotH + 2));
         foreach (var (curve, _, color) in curves)
@@ -701,7 +703,7 @@ internal sealed class PanelPainter
             var visible = 0.0;
             for (int k = 0; k < n; k++) if (double.IsFinite(historyValues[k])) visible = Math.Max(visible, historyValues[k]);
             var max = Math.Max(history.ScaleOf(curve).Max, SpeedScale.RoundUp(visible * (1 + SpeedScale.RiseMargin)));
-            using (var pen = new Pen(color, curve == HistoryCurve.Total ? 2f : 1.5f) { LineJoin = LineJoin.Round })
+            using (var pen = new Pen(color, 1.5f) { LineJoin = LineJoin.Round })
             {
                 var run = new List<PointF>(n);
                 void Flush() { if (run.Count > 1) g.DrawLines(pen, run.ToArray()); else if (run.Count == 1) g.DrawLine(pen, run[0].X - 0.5f, run[0].Y, run[0].X + 0.5f, run[0].Y); run.Clear(); }
