@@ -183,6 +183,58 @@ public class CounterRateTests
     private static EngineCounters C(double? prefill, double? generated) => new EngineCounters(prefill, generated);
 
     [Fact]
+    public void TwoSecondRouterPollsUseWallTimeForTheTotalCurveAndLegend()
+    {
+        var h = new SpeedHistory();
+        for (int t = 0; t <= 124; t += 2)
+        {
+            var active = Math.Min(t, 64);
+            h.Add(At(t), new EngineSnapshot("Custom", "m", EngineStatus.Decode)
+            {
+                HistorySource = "route/m",
+                FullPollCounters = new EngineCounters(active * 500, active * 1000, active / 2.0,
+                    active / 2.0, active * 1000),
+            });
+            if (t == 64) Assert.Equal(1500, h.Latest(HistoryCurve.Total), 9);
+        }
+        var end = SpeedHistory.Seconds(At(124));
+        Assert.Equal(500, h.Average(HistoryCurve.Decode, end), 9);
+        Assert.Equal(750, h.Average(HistoryCurve.Total, end), 9);
+    }
+
+    [Fact]
+    public void TheWindowUsesTheObservedBoundaryAndResetsOnAChangeOfEngine()
+    {
+        var h = new SpeedHistory();
+        EngineSnapshot Snap(string source, double tokens) => new("Custom", source, EngineStatus.Decode)
+        {
+            HistorySource = source,
+            FullPollCounters = C(tokens, tokens * 2),
+        };
+        for (int t = 0; t <= 120; t += 3) h.Add(At(t), Snap("old", t * 100));
+        var end = SpeedHistory.Seconds(At(121));
+        h.Add(At(121), Snap("old", 12_300));
+        Assert.Equal(24_600d / 121, h.Average(HistoryCurve.Decode, end), 9);
+        Assert.Equal(36_900d / 121, h.Average(HistoryCurve.Total, end), 9);
+        h.Add(At(122), Snap("new", 45_000));
+        Assert.True(double.IsNaN(h.Average(HistoryCurve.Decode, end + 1)));
+        Assert.True(double.IsNaN(h.Average(HistoryCurve.Total, end + 1)));
+    }
+
+    [Theory]
+    [InlineData(0, 121)]   // restarted counters
+    [InlineData(200, 160)] // a long gap
+    public void ARestartOrLongGapRequiresAFreshWindow(int tokens, int seconds)
+    {
+        var h = new SpeedHistory();
+        for (int t = 0; t <= 120; t += 2) h.AddCounters(At(t), C(t, t));
+        h.AddCounters(At(seconds), C(tokens, tokens));
+        Assert.True(double.IsNaN(h.Average(HistoryCurve.Total, SpeedHistory.Seconds(At(seconds)))));
+        for (int t = seconds + 2; t <= seconds + 120; t += 2) h.AddCounters(At(t), C(tokens, tokens));
+        Assert.Equal(0, h.Average(HistoryCurve.Total, SpeedHistory.Seconds(At(seconds + 120))));
+    }
+
+    [Fact]
     public void PrefillAndDecodeComeFromTheCounterDeltasAndTotalIsTheirSum()
     {
         var h = new SpeedHistory();
@@ -619,7 +671,7 @@ public class RequestBarTests
 public class WindowAverageTests
 {
     [Fact]
-    public void TheAverageIsOfTheRawSamplesOfTheWindowAndSkipsUnknownOnes()
+    public void ThePrefillAverageUsesRawSamplesAndThroughputRequiresCounters()
     {
         var h = new SpeedHistory();
         h.AddSample(0, 0, 0);                      // older than the window at the end (121 s): dropped
@@ -627,8 +679,8 @@ public class WindowAverageTests
         h.AddSample(110, 20, 200);
         h.AddSample(121, double.NaN, 300);
         Assert.Equal(15, h.Average(HistoryCurve.Prefill, 121));        // the two known samples
-        Assert.Equal(200, h.Average(HistoryCurve.Decode, 121));
-        Assert.Equal(165, h.Average(HistoryCurve.Total, 121));         // (110 + 220) / 2; the unknown total is skipped
+        Assert.True(double.IsNaN(h.Average(HistoryCurve.Decode, 121)));
+        Assert.True(double.IsNaN(h.Average(HistoryCurve.Total, 121)));
         Assert.True(double.IsNaN(new SpeedHistory().Average(HistoryCurve.Total, 0)));
     }
 
@@ -637,19 +689,19 @@ public class WindowAverageTests
     {
         var h = new SpeedHistory();
         h.AddSample(0, 0, 0);
-        h.AddSample(2, 0, 100);
-        h.AddSample(3, 0, 300);
-        Assert.Equal(200, h.Average(HistoryCurve.Decode, 3));          // the raw 100 and 300, not a smoothed curve
+        h.AddSample(2, 100, 0);
+        h.AddSample(3, 300, 0);
+        Assert.Equal(200, h.Average(HistoryCurve.Prefill, 3));
     }
 
     [Fact]
-    public void TimeInWhichNothingRanIsNotPartOfTheAverage()
+    public void TimeInWhichNothingRanIsNotPartOfThePrefillAverage()
     {
         var h = new SpeedHistory();
-        for (int t = 0; t < 100; t++) h.AddSample(t, 0, 0);            // 100 s idle
-        h.AddSample(100, 0, 80); h.AddSample(101, 0, 120);             // two seconds of decoding
-        Assert.Equal(100, h.Average(HistoryCurve.Decode, 101));        // not 2 s worth of speed spread over 102 s
-        Assert.True(double.IsNaN(h.Average(HistoryCurve.Prefill, 101)));      // no prefill ran: nothing to average ("–")
+        for (int t = 0; t < 100; t++) h.AddSample(t, 0, 0);
+        h.AddSample(100, 80, 0); h.AddSample(101, 120, 0);
+        Assert.Equal(100, h.Average(HistoryCurve.Prefill, 101));
+        Assert.True(double.IsNaN(new SpeedHistory().Average(HistoryCurve.Prefill, 101)));
     }
 }
 

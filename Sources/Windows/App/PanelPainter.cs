@@ -671,7 +671,7 @@ internal sealed class PanelPainter
         {
             var (curve, name, color) = curves[i];
             var x = Pad + new[] { 0f, 0.36f, 0.71f }[i] * inner;    // the last name is the shortest
-            // One row: the colour mark, the name, the number. The number is the average of the raw samples of the 60 s window (not of the smoothed curve).
+            // The legend uses the unsmoothed window. Decode and total use cumulative tokens and wall time.
             using (var brush = new SolidBrush(color)) g.FillRectangle(brush, x, y + 14, 8, 3);
             T(name, x + 13, y + 8, Body, false, pal.Dim);
             var average = history.Average(curve, SpeedHistory.Seconds(model.Now));

@@ -52,15 +52,15 @@ public static class RequestBars
 }
 
 /// <summary>
-/// The last 60 seconds of speed of one server, for the history graph and the adaptive scales. One sample per poll.
+/// The last two minutes of speed of one server, for the history graph and the adaptive scales.
 /// Curves (tokens per second, all from the engine's own numbers; an unknown value is NaN and breaks the line):
 ///  - Prefill: prompt tokens per second over all requests. With the engine's phase clocks (<see cref="AddCounters"/>) per second of the time the
 ///    engine spent on prompt work, else per second of wall time.
 ///  - Decode: generated tokens per second over all requests, likewise per second of decode time with the phase clocks.
 ///  - Total: tokens processed per second through the system, prompt plus generated, the throughput meaning of vLLM
 ///    (<c>vllm:prompt_tokens_total</c> + <c>vllm:generation_tokens_total</c> as a rate) and of the OpenTelemetry GenAI token usage
-///    (<c>gen_ai.client.token.usage</c>, input and output tokens), per second of wall time. Without phase clocks it is the sum of the two curves
-///    above; with them it is not (their seconds are the phases' own), and it is unknown when either is unknown.
+///    (<c>gen_ai.client.token.usage</c>, input and output tokens), per second of wall time. With counters it uses their deltas between polls;
+///    otherwise it is the sum of the available phase rates when both are known.
 /// While the engine reports it is idle, all three are 0 (nothing runs). While one request reads, it does not write, so an unreported
 /// decode speed is 0 then, and the other way round; with parallel requests an unreported speed stays unknown.
 /// The samples are raw. The smoothing (<see cref="OnePoleFilter"/>) is applied when the graph reads them, so changing the setting changes
@@ -107,6 +107,9 @@ public sealed class SpeedHistory
     private double counterSampleSeconds = double.NegativeInfinity;
     private readonly CounterRate prefillRate = new(), generatedRate = new();
     private readonly PhaseRate prefillPhase = new(), decodePhase = new();
+    private readonly record struct CounterReading(double Time, double Prefill, double Generated);
+    private readonly Queue<CounterReading> counterWindow = new(Capacity);
+    private CounterReading latestCounters;
     private bool phaseBaseline;
     private string? lastHistorySource;
 
@@ -117,7 +120,8 @@ public sealed class SpeedHistory
     /// them; 0 while the phase does not run), and Total stays the throughput, prompt plus generated tokens per second of wall time. Without them,
     /// prefill and decode are the rates of the computed prompt tokens and the generated tokens per second of wall time, each between the reads at
     /// which its counter rose (<see cref="CounterRate"/>: an engine that publishes its counter once a second gives no 0, 2x, 0, 2x ping-pong), and
-    /// Total is their sum. Returns true when a sample was added. The first read only sets the baseline; a counter that fell (the engine restarted)
+    /// Total always uses both token deltas over the actual elapsed time between reads. Returns true when a sample was added.
+    /// The first read only sets the baseline; a counter that fell (the engine restarted)
     /// adds an unknown sample (a gap) and a new baseline; a gap over <see cref="MaxPollGapSeconds"/> adds nothing and starts over. Null or
     /// incomplete token counters add nothing, and the full polls feed the curves.
     /// </summary>
@@ -128,6 +132,13 @@ public sealed class SpeedHistory
             || !double.IsFinite(prefill) || !double.IsFinite(generated)) return false;
         var elapsed = now - lastCounterSeconds;
         var hadBaseline = !double.IsNaN(lastCounterSeconds) && elapsed > 0 && elapsed <= MaxPollGapSeconds;
+        var previous = latestCounters;
+        var reset = hadBaseline && (prefill < previous.Prefill || generated < previous.Generated);
+        if (!hadBaseline || reset) counterWindow.Clear();
+        while (counterWindow.TryPeek(out var oldest) && (now - oldest.Time > WindowSeconds + MaxPollGapSeconds || counterWindow.Count == Capacity))
+            counterWindow.Dequeue();
+        latestCounters = new CounterReading(now, prefill, generated);
+        counterWindow.Enqueue(latestCounters);
         lastCounterSeconds = now;
         var phases = counters.HasPhaseClocks;
         if (!phases) { prefillPhase.Reset(); decodePhase.Reset(); }
@@ -155,10 +166,11 @@ public sealed class SpeedHistory
             dp = decodePhase.Update(now, counters.DecodeStepTokens!.Value, counters.DecodeBusySeconds!.Value);
         }
         phaseBaseline = phases;
-        if (double.IsNaN(p) || double.IsNaN(g) || double.IsNaN(pp) || double.IsNaN(dp)) { AddSample(now, double.NaN, double.NaN); return true; }     // a counter fell: a gap
+        if (reset || double.IsNaN(p) || double.IsNaN(g) || double.IsNaN(pp) || double.IsNaN(dp)) { AddSample(now, double.NaN, double.NaN); return true; }
+        var total = ((prefill - previous.Prefill) + (generated - previous.Generated)) / elapsed;
         // The read that first brings the phase clocks is their baseline; until the next one the wall-time rates stand in.
-        if (phases && hadPhaseBaseline) AddSample(now, pp, dp, p + g);
-        else AddSample(now, p, g);
+        if (phases && hadPhaseBaseline) AddSample(now, pp, dp, total);
+        else AddSample(now, p, g, total);
         return true;
     }
 
@@ -170,6 +182,7 @@ public sealed class SpeedHistory
         {
             lastHistorySource = s?.HistorySource;
             lastCounterSeconds = double.NaN;
+            counterWindow.Clear();
             counterSampleSeconds = double.NegativeInfinity;
             lastPollSeconds = double.NaN;
         }
@@ -334,12 +347,12 @@ public sealed class SpeedHistory
     }
 
     /// <summary>
-    /// The average of the raw samples of a curve over the last <see cref="WindowSeconds"/> (the smoothing is not applied), counting the samples
-    /// with a known value above 0: the time in which nothing ran (a speed of 0) does not pull the average down, it is the speed of the times it
-    /// ran. NaN when there is none. The legend of the history graph shows it.
+    /// Decode and total are counter deltas over a two-minute wall-time window ending at the latest reading. Prefill is the
+    /// average of positive raw prefill samples in the visible window. NaN when the necessary data is unavailable.
     /// </summary>
     public double Average(HistoryCurve curve, double nowSeconds)
     {
+        if (curve != HistoryCurve.Prefill) return WallAverage(curve, nowSeconds);
         var source = values[(int)curve];
         double sum = 0; int n = 0;
         for (int k = 0; k < count; k++)
@@ -349,6 +362,23 @@ public sealed class SpeedHistory
             sum += source[i]; n++;
         }
         return n == 0 ? double.NaN : sum / n;
+    }
+
+    private double WallAverage(HistoryCurve curve, double nowSeconds)
+    {
+        if (counterWindow.Count < 2 || nowSeconds - latestCounters.Time > MaxPollGapSeconds) return double.NaN;
+        var cutoff = latestCounters.Time - WindowSeconds;
+        CounterReading? baseline = null;
+        // Use the last observed counter at or before the boundary. No tokens are assigned to a fraction of a poll.
+        foreach (var reading in counterWindow)
+        {
+            if (reading.Time > cutoff) break;
+            baseline = reading;
+        }
+        if (baseline is not { } first) return double.NaN;
+        var tokens = latestCounters.Generated - first.Generated;
+        if (curve == HistoryCurve.Total) tokens += latestCounters.Prefill - first.Prefill;
+        return tokens / (latestCounters.Time - first.Time);
     }
 
     /// <summary>The newest raw value of a curve, or NaN when there is none.</summary>

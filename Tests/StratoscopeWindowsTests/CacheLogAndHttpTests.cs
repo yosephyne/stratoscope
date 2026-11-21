@@ -167,8 +167,9 @@ public sealed class HttpJsonSourceTests : IDisposable
         var second = await provider.PollAsync(CancellationToken.None);
         history.Add(start.AddSeconds(2), second);
         Assert.Equal(2, history.Count);
-        Assert.Equal(10, history.Average(HistoryCurve.Decode, SpeedHistory.Seconds(start.AddSeconds(2))));
-        Assert.Equal(20, history.Average(HistoryCurve.Total, SpeedHistory.Seconds(start.AddSeconds(2))));
+        Assert.Equal(10, history.Latest(HistoryCurve.Decode));
+        Assert.Equal(20, history.Latest(HistoryCurve.Total));
+        Assert.True(double.IsNaN(history.Average(HistoryCurve.Decode, SpeedHistory.Seconds(start.AddSeconds(2)))));
 
         for (var i = 0; i < 4; i++) Assert.Null(await provider.ReadCountersAsync(CancellationToken.None));
         Assert.Equal(2, seen.Count(request => request == "GET /upstream/swift/metrics"));
@@ -194,8 +195,8 @@ public sealed class HttpJsonSourceTests : IDisposable
         Assert.Equal(100_000, changed.FullPollCounters!.GeneratedTokens);
         history.Add(start.AddSeconds(6), changed);
         Assert.Equal(3, history.Count);
-        Assert.Equal(10, history.Average(HistoryCurve.Decode, SpeedHistory.Seconds(start.AddSeconds(6))));
-        Assert.Equal(20, history.Average(HistoryCurve.Total, SpeedHistory.Seconds(start.AddSeconds(6))));
+        Assert.True(double.IsNaN(history.Average(HistoryCurve.Decode, SpeedHistory.Seconds(start.AddSeconds(6)))));
+        Assert.True(double.IsNaN(history.Average(HistoryCurve.Total, SpeedHistory.Seconds(start.AddSeconds(6)))));
         Assert.Equal(3, seen.Count(request => request == "GET /upstream/swift/metrics"));
         Assert.Equal(2, seen.Count(request => request == "GET /upstream/six-expert/metrics"));
     }
