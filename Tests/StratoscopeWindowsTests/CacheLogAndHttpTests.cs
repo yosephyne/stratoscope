@@ -83,11 +83,32 @@ public sealed class HttpJsonSourceTests : IDisposable
                 path == "/slow" ? (200, "{}") : (404, "{}"));
             var bytes = System.Text.Encoding.UTF8.GetBytes(body);
             c.Response.StatusCode = status;
+            if (path == "/api/events") c.Response.ContentType = "text/event-stream";
             try { c.Response.OutputStream.Write(bytes, 0, bytes.Length); c.Response.Close(); } catch (Exception) { }
         }
     }
 
     public void Dispose() { listener.Close(); }
+
+    [Fact]
+    public async Task RouterEventsRefreshOnlyForModelAndInflightChanges()
+    {
+        Volatile.Write(ref respond, path => path == "/api/events" ? (200,
+            "data: {\"type\":\"uiConfig\"}\r\n\r\n" +
+            "data: broken-json\r\n\r\n" +
+            "data: {\"type\":\"modelStatus\",\"data\":\"[]\"}\r\n\r\n" +
+            "data: {\"type\":\"activity\"}\r\n\r\n" +
+            "data: {\"type\":\"inflight\",\"data\":\"[]\"}\r\n\r\n") : (404, "{}"));
+        using var source = new HttpJsonSource();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var refreshes = 0;
+        await source.WatchRouterEventsAsync(Endpoints.Join(prefix, "api", "events"), () =>
+        {
+            if (++refreshes == 2) deadline.Cancel();
+        }, deadline.Token);
+        Assert.Equal(2, refreshes);
+        Assert.Equal(new[] { "GET /api/events" }, seen.ToArray());
+    }
 
     [Theory]
     [InlineData(200, """{"running":[{"model":"six-expert","state":"starting"}]}""", EngineStatus.Loading)]

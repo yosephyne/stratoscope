@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.ServerSentEvents;
+using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
 namespace Stratoscope.Core;
@@ -125,6 +127,53 @@ public sealed class HttpJsonSource : IJsonSource, IDisposable
         {
             return new TextResponse { Failure = Classify(e), Detail = e.InnerException?.Message ?? e.Message };
         }
+    }
+
+    /// <summary>Uses llama-swap events as refresh signals. Engine telemetry still comes from the engine adapter.</summary>
+    public async Task WatchRouterEventsAsync(Uri eventsUrl, Action refresh, CancellationToken cancellation)
+    {
+        try
+        {
+            while (!cancellation.IsCancellationRequested)
+            {
+                using var connection = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                connection.CancelAfter(timeout);
+                try
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, eventsUrl);
+                    request.Headers.Accept.ParseAdd("text/event-stream");
+                    using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, connection.Token).ConfigureAwait(false);
+                    if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                        return;
+                    if (response.IsSuccessStatusCode)
+                    {
+                        if (response.Content.Headers.ContentType?.MediaType != "text/event-stream") return;
+                        // Renew even if the remote socket stalls without closing. Ordinary polls continue independently.
+                        connection.CancelAfter(TimeSpan.FromMinutes(2));
+                        using var stream = await response.Content.ReadAsStreamAsync(connection.Token).ConfigureAwait(false);
+                        await foreach (var item in SseParser.Create(stream).EnumerateAsync(connection.Token).ConfigureAwait(false))
+                            if (IsRouterRefreshEvent(item.Data)) refresh();
+                    }
+                }
+                catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
+                catch (Exception e) when (e is HttpRequestException or IOException) { }
+                await Task.Delay(TimeSpan.FromSeconds(5), cancellation).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (cancellation.IsCancellationRequested) { }
+    }
+
+    private static bool IsRouterRefreshEvent(string data)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(data);
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String
+                && type.GetString() is "modelStatus" or "inflight";
+        }
+        catch (JsonException) { return false; }
     }
 
     private static FetchFailure Classify(HttpRequestException e) =>

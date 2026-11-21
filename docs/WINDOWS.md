@@ -74,13 +74,15 @@ A server on another machine is reached through an SSH forward or a VPN address. 
 
 ## Routed polling
 
-Every two seconds, `RoutedProvider.PollAsync` reads the router's `/running`. It requests engine data for the first listed model only when the entry has a valid ID and reports `ready`. When configured, a direct engine address is still the fallback for an empty or unreachable router. A 429 can retain the last snapshot for the same ready target, marked as limited.
+The Windows readout refreshes every 500 ms while a request is active and every two seconds while idle or when the router limits reads. It subscribes to llama-swap's `/api/events` and schedules an early refresh on model status or in-flight request changes. Those events are refresh signals. `RoutedProvider.PollAsync` reads the router's `/running` and requests telemetry from the first listed model only when the entry has a valid ID and reports `ready`. Speed and token counts come from the specific engine's endpoints. A 429 can retain the last snapshot for the same ready target, marked as limited. When configured, a direct engine address is the fallback for an empty or unreachable router.
 
 The Windows history uses counters from each successful full poll on a router configuration, including direct fallback. The 0.5 s tick reads counters only on a direct-only connection. Model changes and unavailable targets reset the rate baseline. A cancelled or rate-limited poll adds no new counter reading.
 
 A `GET /upstream/<model>/...` can activate a model on llama-swap. The router must enforce ready-only forwarding to prevent activation if a model unloads after the discovery response. llama-swap v270 supports `upstream.ignorePaths` for refusing these requests when a model is cold. Its check runs before normal dispatch, which still leaves a race within the router. [llama-swap v270 upstream dispatch](https://github.com/mostlygeek/llama-swap/blob/v270/internal/server/api.go#L488-L514)
 
-**Reuse and libraries.** Discovery uses `Json.RunningType`. `CustomMetrics.Parse` already reads cumulative tokens and phase clocks in the full poll, and `SpeedHistory.AddCounters` calculates their rates. The HTTP contract tests use `HttpJsonSource` and the existing loopback listener. The v270 event stream is an option for future process discovery. The engine counters and request details still come from HTTP reads of its metrics and state. [llama-swap v270 model status events](https://github.com/mostlygeek/llama-swap/blob/v270/internal/server/apigroup.go#L589-L652)
+The parallel decode headline also shows the engine-reported generated-token count summed across the currently decoding slots. Long-lived upstream telemetry streams count as active model requests on llama-swap v270 and can hold up model swaps. The router's own event stream is separate from model dispatch. [llama-swap v270 request tracking](https://github.com/mostlygeek/llama-swap/blob/v270/internal/router/base.go#L237-L257)
+
+**Reuse and libraries.** Discovery uses `Json.RunningType`. `CustomMetrics.Parse` already reads cumulative tokens and phase clocks in the full poll, and `SpeedHistory.AddCounters` calculates their rates. The event subscription reuses `HttpJsonSource` and .NET's `SseParser`. The HTTP contract tests use the existing loopback listener. [llama-swap v270 model status events](https://github.com/mostlygeek/llama-swap/blob/v270/internal/server/apigroup.go#L589-L652)
 
 ## Differences from the Mac app
 

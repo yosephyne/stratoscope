@@ -487,7 +487,8 @@ internal sealed class PanelPainter
             if (l != null && anyActive)
             {
                 var reading = s.IsReading;
-                T(reading ? "Prefill" : "Decode", Pad, y + 40, Body, true);
+                var phase = reading ? "Prefill" : l.Generated is double generated ? $"Decode · {Fmt.Number(generated)} tokens" : "Decode";
+                T(phase, Pad, y + 40, Body, true);
                 var total = reading ? l.PrefillTokensPerSecond : l.DecodeTokensPerSecond;
                 T(total.HasValue ? Fmt.Number(total) + " t/s" : Fmt.Missing, 0, y + 40, Body, true, null, Width - Pad);
             }

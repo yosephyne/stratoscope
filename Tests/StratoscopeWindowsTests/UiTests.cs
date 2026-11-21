@@ -121,6 +121,25 @@ public class DpiTests
 
 public class StatusPanelWindowTests
 {
+    [Fact]
+    public void ParallelDecodeShowsTheLiveGeneratedCountBesideTheHeadline()
+    {
+        var snapshot = new EngineSnapshot("Basalt", "m", EngineStatus.Decode)
+        {
+            Live = new LiveRequest { Generated = 70, DecodeTokensPerSecond = 92, Running = 2 },
+            Slots =
+            [
+                new BatchSlot { Index = 0, State = "decoding", Generated = 30 },
+                new BatchSlot { Index = 1, State = "decoding", Generated = 40 },
+            ],
+        };
+        var model = Painters.Model(snapshot);
+        Assert.Contains("Decode · 70 tokens", Painters.Paint(model, true, out _).Texts);
+        snapshot.Live.Generated = 83;
+        Assert.Contains("Decode · 83 tokens", Painters.Paint(model, true, out _).Texts);
+        snapshot.Live.Generated = null;
+        Assert.Contains("Decode", Painters.Paint(model, true, out _).Texts);
+    }
     /// <summary>A panel on a work area that is smaller than its content: the layout is capped, the content scrolls, keys move the focus and activate. No window is shown.</summary>
     [Fact]
     public void ThePanelWindowTakesTheLayoutAndAScreenOfContentScrolls()

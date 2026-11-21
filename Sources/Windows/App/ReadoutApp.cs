@@ -9,7 +9,7 @@ using static Windows.Win32.PInvoke;
 namespace Stratoscope.Windows;
 
 /// <summary>
-/// The running app: polls the servers every two seconds and shows the result in the taskbar readout. There is no notification-area
+/// The running app: refreshes engine telemetry faster while requests run, and shows it in the taskbar readout. There is no notification-area
 /// icon: the readout is the only presence, so it stays visible, grey, while no engine answers.
 ///
 /// Everything that depends on the display or on Windows settings goes through one <see cref="UiController"/>. Any event that could change
@@ -18,15 +18,16 @@ namespace Stratoscope.Windows;
 /// </summary>
 internal sealed class ReadoutApp : ApplicationContext
 {
-    private const int PollMilliseconds = 2000;
+    private const int IdlePollMilliseconds = 2000;
+    private const int LivePollMilliseconds = 500;
     public const string QuitEventName = "Local\\Stratoscope.Windows.Quit";
     private readonly SynchronizationContext? uiContext = SynchronizationContext.Current;
     private readonly EventWaitHandle quitEvent;
     private readonly RegisteredWaitHandle quitWait;
 
     private readonly string? configPath;
-    private readonly IJsonSource source = new HttpJsonSource();
-    private readonly System.Windows.Forms.Timer pollTimer = new System.Windows.Forms.Timer { Interval = PollMilliseconds };
+    private readonly HttpJsonSource source = new();
+    private readonly System.Windows.Forms.Timer pollTimer = new() { Interval = IdlePollMilliseconds };
     private readonly System.Windows.Forms.Timer reloadTimer = new System.Windows.Forms.Timer { Interval = 600 };
     /// <summary>The light counter read for the speed curves: every <see cref="SpeedHistory.SampleSeconds"/>, the panel repaints with it while it is open.</summary>
     private readonly System.Windows.Forms.Timer sampleTimer = new System.Windows.Forms.Timer { Interval = (int)(SpeedHistory.SampleSeconds * 1000) };
@@ -41,6 +42,9 @@ internal sealed class ReadoutApp : ApplicationContext
     private List<ServerMonitor> monitors = new List<ServerMonitor>();
     private int selected;
     private bool polling;
+    private bool pollRequested;
+    private long lastPollStarted;
+    private CancellationTokenSource? routerEvents;
 
     public ReadoutApp(string? configFile)
     {
@@ -110,8 +114,18 @@ internal sealed class ReadoutApp : ApplicationContext
 
     private void UseServers()
     {
+        routerEvents?.Cancel();
+        routerEvents?.Dispose();
         monitors = config.Servers.Select(s => new ServerMonitor(s.Name, EngineRegistry.Make(s, source))).ToList();
         selected = Servers.Clamp(selected, monitors.Count);
+        routerEvents = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token);
+        var lifetime = routerEvents.Token;
+        foreach (var router in config.Servers.Select(s => s.Router).Distinct())
+        {
+            if (!Uri.TryCreate(router, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) continue;
+            _ = source.WatchRouterEventsAsync(Endpoints.Join(uri.AbsoluteUri, "api", "events"),
+                () => BeginInvokeOnUi(() => RequestEarlyPoll(lifetime)), lifetime);
+        }
     }
 
     // MARK: Finding the server
@@ -205,14 +219,35 @@ internal sealed class ReadoutApp : ApplicationContext
     {
         if (polling) return;
         polling = true;
+        pollRequested = false;
+        lastPollStarted = Stopwatch.GetTimestamp();
         try
         {
             var current = monitors;
             await Task.WhenAll(current.Select(m => m.PollAsync(cancellation.Token)));
-            if (ReferenceEquals(current, monitors)) UpdateUi();
+            if (ReferenceEquals(current, monitors))
+            {
+                SetPollInterval(pollRequested || current.Any(m => m.Snapshot is { IsBusy: true, RouterLimited: false })
+                    ? LivePollMilliseconds : IdlePollMilliseconds);
+                UpdateUi();
+            }
         }
         catch (OperationCanceledException) { }
         finally { polling = false; }
+    }
+
+    private void RequestEarlyPoll(CancellationToken lifetime)
+    {
+        if (lifetime.IsCancellationRequested) return;
+        pollRequested = true;
+        SetPollInterval(LivePollMilliseconds);
+        if (!polling && Stopwatch.GetElapsedTime(lastPollStarted).TotalMilliseconds >= LivePollMilliseconds)
+            _ = PollAllAsync();
+    }
+
+    private void SetPollInterval(int milliseconds)
+    {
+        if (pollTimer.Interval != milliseconds) pollTimer.Interval = milliseconds;
     }
 
     /// <summary>
@@ -303,6 +338,7 @@ internal sealed class ReadoutApp : ApplicationContext
         if (!panel.IsOpen) settingsOpen = false;
         panel.Toggle(anchor, readout.Edge);
         readout.SuppressTips = panel.IsOpen;
+        if (panel.IsOpen) RequestEarlyPoll(cancellation.Token);
     }
 
     private void ShowSettings(bool open)
@@ -369,10 +405,11 @@ internal sealed class ReadoutApp : ApplicationContext
         quitWait.Unregister(null);
         quitEvent.Dispose();
         cancellation.Cancel();
+        routerEvents?.Dispose();
         watcher?.Dispose();
         readout.Dispose();
         panel.Dispose();
-        (source as IDisposable)?.Dispose();
+        source.Dispose();
         base.ExitThreadCore();
     }
 }
