@@ -51,6 +51,8 @@ public static class RequestBars
     }
 }
 
+internal readonly record struct ThroughputWindow(double Seconds, double Generated, double Prefill);
+
 /// <summary>
 /// The last two minutes of speed of one server, for the history graph and the adaptive scales.
 /// Curves (tokens per second, all from the engine's own numbers; an unknown value is NaN and breaks the line):
@@ -110,6 +112,8 @@ public sealed class SpeedHistory
     private readonly record struct CounterReading(double Time, double Prefill, double Generated);
     private readonly Queue<CounterReading> counterWindow = new(Capacity);
     private CounterReading latestCounters;
+    private ThroughputWindow? reportedThroughput;
+    private double reportedThroughputAt;
     private bool phaseBaseline;
     private string? lastHistorySource;
 
@@ -186,6 +190,8 @@ public sealed class SpeedHistory
             counterSampleSeconds = double.NegativeInfinity;
             lastPollSeconds = double.NaN;
         }
+        reportedThroughput = s?.ReportedThroughput;
+        reportedThroughputAt = Seconds(utc);
         if (s?.FullPollCounters is { } counters) AddCounters(utc, counters);
 
         // While counters feed the curves, do not interleave rates from another source.
@@ -219,7 +225,7 @@ public sealed class SpeedHistory
     }
 
     /// <summary>A gap longer than this between two polls (a sleeping PC, a stalled engine) makes no rate: the counters then say nothing about the speed.</summary>
-    private const double MaxPollGapSeconds = 30;
+    internal const double MaxPollGapSeconds = 30;
     private const int MaxSlots = 64;
     private double lastPollSeconds = double.NaN, lastPrefillCounter = double.NaN, lastGenerationCounter = double.NaN;
     private readonly double[] lastSlotRead = Enumerable.Repeat(double.NaN, MaxSlots).ToArray();
@@ -347,8 +353,8 @@ public sealed class SpeedHistory
     }
 
     /// <summary>
-    /// Decode and total are counter deltas over a two-minute wall-time window ending at the latest reading. Prefill is the
-    /// average of positive raw prefill samples in the visible window. NaN when the necessary data is unavailable.
+    /// Decode and total use up to two minutes of wall time. Engine history can provide the window on the first poll.
+    /// Prefill is the average of positive raw prefill samples. NaN when the necessary data is unavailable.
     /// </summary>
     public double Average(HistoryCurve curve, double nowSeconds)
     {
@@ -366,19 +372,24 @@ public sealed class SpeedHistory
 
     private double WallAverage(HistoryCurve curve, double nowSeconds)
     {
-        if (counterWindow.Count < 2 || nowSeconds - latestCounters.Time > MaxPollGapSeconds) return double.NaN;
-        var cutoff = latestCounters.Time - WindowSeconds;
-        CounterReading? baseline = null;
-        // Use the last observed counter at or before the boundary. No tokens are assigned to a fraction of a poll.
-        foreach (var reading in counterWindow)
+        var window = nowSeconds - reportedThroughputAt <= MaxPollGapSeconds ? reportedThroughput : null;
+        if (counterWindow.Count >= 2 && nowSeconds - latestCounters.Time <= MaxPollGapSeconds)
         {
-            if (reading.Time > cutoff) break;
-            baseline = reading;
+            var cutoff = latestCounters.Time - WindowSeconds;
+            var first = counterWindow.Peek();
+            // Take an observed boundary. While the window fills, use all the time observed so far.
+            foreach (var reading in counterWindow)
+            {
+                if (reading.Time > cutoff) break;
+                first = reading;
+            }
+            var seconds = latestCounters.Time - first.Time;
+            if (window is null || seconds >= WindowSeconds || seconds >= window.Value.Seconds)
+                window = new ThroughputWindow(seconds, latestCounters.Generated - first.Generated, latestCounters.Prefill - first.Prefill);
         }
-        if (baseline is not { } first) return double.NaN;
-        var tokens = latestCounters.Generated - first.Generated;
-        if (curve == HistoryCurve.Total) tokens += latestCounters.Prefill - first.Prefill;
-        return tokens / (latestCounters.Time - first.Time);
+        if (window is not { } available) return double.NaN;
+        var tokens = available.Generated + (curve == HistoryCurve.Total ? available.Prefill : 0);
+        return tokens / available.Seconds;
     }
 
     /// <summary>The newest raw value of a curve, or NaN when there is none.</summary>

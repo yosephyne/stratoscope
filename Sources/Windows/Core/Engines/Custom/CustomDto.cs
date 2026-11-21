@@ -19,6 +19,7 @@ public sealed record CustomHealth
 public sealed record CustomUiState
 {
     [JsonPropertyName("info")] public CustomInfo? Info { get; init; }
+    [JsonPropertyName("history")] public List<CustomSample?>? History { get; init; }
     [JsonPropertyName("log")] public List<CustomLogEntry?>? Log { get; init; }
     [JsonPropertyName("tick")] public CustomTick? Tick { get; init; }
 
@@ -42,6 +43,7 @@ public sealed record CustomInfo
 /// <summary><c>tick</c> of <c>/ui/state</c> (stats.py <c>Hub.tick()</c>).</summary>
 public sealed record CustomTick
 {
+    [JsonPropertyName("t")] public double? T { get; init; }
     [JsonPropertyName("engine")] public string? Engine { get; init; }
     [JsonPropertyName("seqs")] public List<CustomSeq?>? Seqs { get; init; }
     [JsonPropertyName("vram")] public CustomVram? Vram { get; init; }
@@ -53,6 +55,7 @@ public sealed record CustomTick
 /// <summary>The latest NVML sample (stats.py <c>Nvml.sample</c>).</summary>
 public sealed record CustomSample
 {
+    [JsonPropertyName("t")] public double? T { get; init; }
     [JsonPropertyName("util")] public double? Util { get; init; }
     [JsonPropertyName("mem_util")] public double? MemUtil { get; init; }
     [JsonPropertyName("power")] public double? Power { get; init; }

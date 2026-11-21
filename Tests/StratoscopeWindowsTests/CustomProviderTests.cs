@@ -260,6 +260,37 @@ public class CustomIdleCaptureTests
 // (out 300, max_new 2048, decode_s 10.0), r3 and r5 waiting, r4 running prefill with prefill_s 0.
 public class CustomUiStateTests
 {
+    [Fact]
+    public void TheFirstPollShowsTheEnginesTimeWeightedHistoryIncludingIdle()
+    {
+        var ui = Json.Deserialize("""
+            {
+              "history": [
+                {"t":5,"decode_tps":0,"prefill_tps":0},
+                {"t":8,"decode_tps":1000,"prefill_tps":1000},
+                {"t":10,"decode_tps":500,"prefill_tps":500},
+                {"t":12,"decode_tps":50,"prefill_tps":10},
+                {"t":15,"decode_tps":0,"prefill_tps":0}
+              ],
+              "log": [{"t":9,"kind":"engine"}],
+              "tick": {"t":15,"engine":"ready"}
+            }
+            """, Json.CustomUiStateType)!;
+        var snapshot = Provider().Translate(Busy(), "m", ui);
+        var history = new SpeedHistory();
+        history.Add(DateTime.UnixEpoch, snapshot);
+        Assert.Equal(20, history.Average(HistoryCurve.Decode, 0));
+        Assert.Equal(24, history.Average(HistoryCurve.Total, 0));
+        var panel = Painters.Model(snapshot);
+        panel.Now = DateTime.UnixEpoch;
+        panel.History = history;
+        var texts = Painters.Paint(panel, true, out _).Texts.ToList();
+        Assert.Contains("Avg decode", texts);
+        Assert.Contains("Avg total", texts);
+        Assert.Equal("20", texts[texts.IndexOf("Avg decode") + 1]);
+        Assert.Equal("24", texts[texts.IndexOf("Avg total") + 1]);
+    }
+
     private const string Address = "http://127.0.0.1:8095";
 
     private static CustomProvider Provider() => new(new EngineConfig(), new FakeSource());

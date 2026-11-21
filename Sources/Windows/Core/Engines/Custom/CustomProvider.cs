@@ -111,6 +111,43 @@ public sealed class CustomProvider : RoutedProvider
     /// <summary>A phase speed of the sample when that phase ran in it (above 0), else null.</summary>
     private static double? Positive(double? v) => v is double d && double.IsFinite(d) && d > 0 ? d : null;
 
+    // stats.py publishes token-counter deltas divided by each sample's wall-time interval. Reverse the division
+    // before adding the counts. Start a fresh window at the latest engine lifecycle event or unknown interval.
+    private static ThroughputWindow? ReadThroughputHistory(CustomUiState? ui)
+    {
+        if (ui?.History is not { Count: >= 2 } history || history[^1]?.T is not double end
+            || !double.IsFinite(end) || ui.Tick?.T - end > SpeedHistory.MaxPollGapSeconds)
+            return null;
+
+        var since = ui.Log is { Count: > 0 } log ? log[0]?.T ?? 0 : 0;
+        if (ui.Log is { } events)
+            foreach (var entry in events)
+                if (entry is { Kind: "engine", T: double t }) since = Math.Max(since, t);
+
+        var start = end;
+        double generated = 0, prefilled = 0;
+        for (var i = history.Count - 1; i > 0 && end - start < SpeedHistory.WindowSeconds; i--)
+        {
+            if (history[i - 1]?.T is not double previous || previous < since || history[i] is not { } sample) break;
+            var elapsed = start - previous;
+            if (!double.IsFinite(elapsed) || elapsed <= 0 || elapsed > SpeedHistory.MaxPollGapSeconds
+                || CountTokens(sample.DecodeTps, elapsed) is not double output
+                || CountTokens(sample.PrefillTps, elapsed) is not double prompt) break;
+            generated += output;
+            prefilled += prompt;
+            start = previous;
+        }
+        return end > start ? new ThroughputWindow(end - start, generated, prefilled) : null;
+    }
+
+    private static double? CountTokens(double? rate, double elapsed)
+    {
+        if (rate is not double tps || !double.IsFinite(tps) || tps < 0) return null;
+        var tokens = tps * elapsed;
+        var whole = Math.Round(tokens);
+        return Math.Abs(tokens - whole) <= 1e-6 ? whole : null;
+    }
+
     /// <summary>The state text of a <c>/health</c> status other than ok, or null when the engine is ready.</summary>
     internal static string? NotReady(string? status) =>
         string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase) ? null : status is null ? "State not reported" : "State: " + status;
@@ -272,6 +309,7 @@ public sealed class CustomProvider : RoutedProvider
             Live = live, Recent = recent,
             Context = new ContextUsage { Used = ctxUsed, Max = uiInfo?.MaxTokens, CompactAt = CompactAt(model) },
             System = system, Cache = cache, Totals = totals, Info = info, Slots = slots, Links = Links(),
+            ReportedThroughput = ReadThroughputHistory(ui),
         };
     }
 }

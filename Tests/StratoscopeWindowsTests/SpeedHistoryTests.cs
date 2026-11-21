@@ -221,6 +221,18 @@ public class CounterRateTests
         Assert.True(double.IsNaN(h.Average(HistoryCurve.Total, end + 1)));
     }
 
+    [Fact]
+    public void AShortCounterHistoryUsesTheTimeObservedSoFar()
+    {
+        var h = new SpeedHistory();
+        h.AddCounters(At(0), C(7, 10));
+        h.AddCounters(At(2), C(11, 18));
+        h.AddCounters(At(5), C(11, 18));
+        var now = SpeedHistory.Seconds(At(5));
+        Assert.Equal(8d / 5, h.Average(HistoryCurve.Decode, now));
+        Assert.Equal(12d / 5, h.Average(HistoryCurve.Total, now));
+    }
+
     [Theory]
     [InlineData(0, 121)]   // restarted counters
     [InlineData(200, 160)] // a long gap
