@@ -32,6 +32,7 @@ public final class StrataProvider: EngineProvider {
     private let basalt = BasaltReader()      // for the Basalt engines that answer at the same addresses
     private let llama = LlamaCppReader()     // for llama-server, whose /metrics (with --metrics) is Prometheus text and which names itself in /props
     private let custom = CustomReader()      // for the custom server, whose /metrics is Prometheus text
+    private let mtplx = MtplxReader()        // for MTPLX (MLX engine), whose /metrics is JSON with `latest` and `recent`
     private var proxy = "http://127.0.0.1:8095"
     private var lastRead: (Double, Date)?
     private let slotSpeeds = SlotRateTracker()
@@ -64,6 +65,7 @@ public final class StrataProvider: EngineProvider {
                     return
                 }
                 if BasaltReader.recognises(m) { self.readBasalt(m, model: name, completion); return }
+                if MtplxReader.recognises(m) { self.readMtplx(m, model: name, completion); return }
                 completion(self.snapshot(from: m, model: name))
             }
         }
@@ -74,6 +76,7 @@ public final class StrataProvider: EngineProvider {
         let base = config.url ?? "http://127.0.0.1:8095"
         http.get(base + "/metrics") { [weak self] m in
             guard let self = self else { return }
+            if let m = m, MtplxReader.recognises(m) { self.proxy = base; self.readMtplx(m, model: "", completion); return }
             guard let m = m, let eng = m["engine"] as? [String: Any] else {
                 // Not a Strata or Basalt document: llama-server (checked by its /props) and the custom server answer /metrics in text. Hidden when it is none of these.
                 self.readText(base: base, routedModel: nil, completion)
@@ -88,6 +91,11 @@ public final class StrataProvider: EngineProvider {
     /// The server behind this address is a Basalt: its document is translated by `BasaltReader`.
     private func readBasalt(_ m: [String: Any], model: String, _ completion: @escaping (EngineSnapshot?) -> Void) {
         basalt.read(m, base: proxy, model: model, compactAt: compactAt(model: model), links: links(engine: "Basalt"), completion)
+    }
+
+    /// The server behind this address is MTPLX: its document is translated by `MtplxReader`.
+    private func readMtplx(_ m: [String: Any], model: String, _ completion: @escaping (EngineSnapshot?) -> Void) {
+        mtplx.read(m, base: proxy, model: model, compactAt: compactAt(model: model), links: links(engine: MtplxReader.brand), completion)
     }
 
     /// The JSON reads failed: ask whether llama-server sits at `base` (its `/props` names it), else whether the custom server does (nil when

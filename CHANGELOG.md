@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- MTPLX (MLX engine with multi-token prediction, also its M1 fork `mtplx-m1`) connector on the Mac: model, context window, MTP depth and profile from `/health`, finished requests from `/metrics` (prompt, cached tokens, read, speeds, finish reason). The server has no live progress, so a running request shows as "running" without a speed. Recognised behind llama-swap like the other engines; setting value `engine: mtplx`. Checked against a live server only, no recorded payload test yet.
+
 - Windows reuses each full poll's metrics for routed history. The half-second history tick sends no requests through the router, including when the previously observed model is unloading or another model is starting.
 
 - Panel (engines with several slots): one fixed row per engine slot, each showing the request's own speed (decode blue on the taskbar scale, prefill orange), empty rows stay as empty tracks, the live block has the same height idle and busy; the history legend says "Avg". Windows: a failed UI Automation read of the taskbar buttons no longer moves the readout (the last good read is kept). Mac: scale and legend mirrored, unbuilt.

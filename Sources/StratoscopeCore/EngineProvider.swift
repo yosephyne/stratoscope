@@ -14,12 +14,12 @@ public protocol EngineProvider: AnyObject {
 }
 
 public enum EngineRegistry {
-    public static let available: [String] = [StrataProvider.id, LlamaCppReader.id, CustomReader.id, DemoProvider.id]
+    public static let available: [String] = [StrataProvider.id, MtplxReader.id, LlamaCppReader.id, CustomReader.id, DemoProvider.id]
 
     public static func make(_ config: Config) -> EngineProvider {
         switch config.engine.lowercased() {
         case DemoProvider.id: return DemoProvider()
-        default: return StrataProvider(   // also serves `engine: llamacpp` and `engine: custom`: the provider tells the engines apart by their answers.
+        default: return StrataProvider(   // also serves `engine: mtplx`, `engine: llamacpp` and `engine: custom`: the provider tells the engines apart by their answers.
 config: config, clients: config.readClientConfigs ? ClientConfigReader(configHome: ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]) : nil)
         }
     }

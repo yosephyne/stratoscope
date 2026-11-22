@@ -74,7 +74,9 @@ public enum ServerDetection {
         fetcher.get(address + "/running") { running in
             if running?["running"] is [Any] { done(DetectedServer(router: address)); return }
             fetcher.get(address + "/metrics") { metrics in
-                if let engine = metrics?["engine"] as? [String: Any], !engine.isEmpty { done(DetectedServer(url: address)) } else { done(nil) }
+                if let engine = metrics?["engine"] as? [String: Any], !engine.isEmpty { done(DetectedServer(url: address)) }
+                else if let metrics = metrics, MtplxReader.recognises(metrics) { done(DetectedServer(url: address)) }
+                else { done(nil) }
             }
         }
     }
