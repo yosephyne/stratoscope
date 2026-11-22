@@ -32,7 +32,7 @@ public final class StrataProvider: EngineProvider {
     private let basalt = BasaltReader()      // for the Basalt engines that answer at the same addresses
     private let llama = LlamaCppReader()     // for llama-server, whose /metrics (with --metrics) is Prometheus text and which names itself in /props
     private let custom = CustomReader()      // for the custom server, whose /metrics is Prometheus text
-    private var proxy ="http://127.0.0.1:8095"
+    private var proxy = "http://127.0.0.1:8095"
     private var lastRead: (Double, Date)?
     private let slotSpeeds = SlotRateTracker()
     private let clients: ClientConfigReader?
